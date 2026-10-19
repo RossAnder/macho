@@ -3,11 +3,14 @@
 //! Nothing here spawns a process: every field is a handful of syscalls at most.
 //! Each probe is independent and fails soft, so a missing source just drops a line.
 
-use std::env;
-use std::fs::{self, File};
-use std::io::Read;
-use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::sys;
+
+const ARCH: &str = if cfg!(target_arch = "x86_64") { "x86_64" } else { "aarch64" };
 
 pub struct System {
     pub user: String,
@@ -34,13 +37,14 @@ impl System {
     pub fn gather() -> Self {
         let (os, os_ids) = os_release();
         let (shell, terminal) = shell_and_terminal();
+        let [node, kernel, _] = sys::uname().map_or([None, None, None], |fields| fields.map(Some));
         Self {
             user: user(),
-            host: host(),
+            host: host(node),
             os,
             os_ids,
-            kernel: read_trimmed("/proc/sys/kernel/osrelease"),
-            uptime_secs: uptime(),
+            kernel: kernel.filter(|k| !k.is_empty()),
+            uptime_secs: sys::uptime_secs(),
             packages: packages(),
             shell,
             desktop: desktop(),
@@ -51,14 +55,14 @@ impl System {
     }
 }
 
-fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
-    let s = fs::read_to_string(path).ok()?;
+fn read_trimmed(path: &str) -> Option<String> {
+    let s = sys::read_small(path)?;
     let s = s.trim();
     (!s.is_empty()).then(|| s.to_owned())
 }
 
 fn var(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|v| !v.is_empty())
+    sys::var(key).filter(|v| !v.is_empty()).map(str::to_owned)
 }
 
 fn user() -> String {
@@ -66,26 +70,29 @@ fn user() -> String {
 }
 
 fn user_from_passwd() -> Option<String> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let status = sys::read_small("/proc/self/status")?;
     let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?.split_whitespace().next()?;
-    let passwd = fs::read_to_string("/etc/passwd").ok()?;
-    passwd.lines().find_map(|line| {
-        let mut fields = line.split(':');
-        let name = fields.next()?;
-        (fields.nth(1)? == uid).then(|| name.to_owned())
-    })
+    let mut user = None;
+    sys::for_each_line("/etc/passwd", |line| {
+        let mut fields = line.split(|&b| b == b':');
+        let name = fields.next();
+        if fields.nth(1) == Some(uid.as_bytes()) {
+            user = name.and_then(|n| core::str::from_utf8(n).ok()).map(str::to_owned);
+        }
+        user.is_none()
+    });
+    user
 }
 
-fn host() -> String {
-    read_trimmed("/proc/sys/kernel/hostname")
+fn host(node: Option<String>) -> String {
+    node.filter(|n| !n.is_empty() && n != "(none)")
         .or_else(|| read_trimmed("/etc/hostname"))
         .or_else(|| var("HOSTNAME"))
         .unwrap_or_else(|| "localhost".into())
 }
 
 fn os_release() -> (Option<String>, Vec<String>) {
-    let Ok(text) =
-        fs::read_to_string("/etc/os-release").or_else(|_| fs::read_to_string("/usr/lib/os-release"))
+    let Some(text) = sys::read_small("/etc/os-release").or_else(|| sys::read_small("/usr/lib/os-release"))
     else {
         return (None, Vec::new());
     };
@@ -103,7 +110,7 @@ fn os_release() -> (Option<String>, Vec<String>) {
         }
     }
 
-    let os = pretty.or(name).map(|n| format!("{n} {}", env::consts::ARCH));
+    let os = pretty.or(name).map(|n| format!("{n} {ARCH}"));
     let ids = id
         .into_iter()
         .chain(like.into_iter().flat_map(str::split_whitespace))
@@ -112,61 +119,54 @@ fn os_release() -> (Option<String>, Vec<String>) {
     (os, ids)
 }
 
-fn uptime() -> Option<u64> {
-    let s = fs::read_to_string("/proc/uptime").ok()?;
-    s.split(['.', ' ']).next()?.parse().ok()
-}
-
 fn packages() -> Vec<(&'static str, usize)> {
-    let home = var("HOME").unwrap_or_default();
+    let home = sys::var("HOME").unwrap_or_default();
     let counts = [
         ("pacman", count_dirs("/var/lib/pacman/local")),
-        ("dpkg", count_matching_lines("/var/lib/dpkg/status", |l| l == "Status: install ok installed")),
-        ("apk", count_matching_lines("/lib/apk/db/installed", |l| l.starts_with("P:"))),
+        ("dpkg", count_matching_lines("/var/lib/dpkg/status", |l| l == b"Status: install ok installed")),
+        ("apk", count_matching_lines("/lib/apk/db/installed", |l| l.starts_with(b"P:"))),
         ("xbps", xbps()),
         (
             "flatpak",
-            count_dirs("/var/lib/flatpak/app") + count_dirs(format!("{home}/.local/share/flatpak/app")),
+            count_dirs("/var/lib/flatpak/app") + count_dirs(&format!("{home}/.local/share/flatpak/app")),
         ),
-        ("nix", nix_profile(&home)),
+        // Each element of a `nix profile` manifest lists its store paths.
+        ("nix", sys::count_in_file(&format!("{home}/.nix-profile/manifest.json"), b"\"storePaths\"")),
     ];
     counts.into_iter().filter(|&(_, n)| n > 0).collect()
 }
 
-fn count_dirs(path: impl AsRef<Path>) -> usize {
-    let path = path.as_ref();
-    let Ok(meta) = fs::metadata(path) else { return 0 };
+fn count_dirs(path: &str) -> usize {
+    let Some(st) = sys::stat(path).filter(|st| st.is_dir) else { return 0 };
     // A directory's link count is 2 + its subdirectories on most filesystems, which
     // saves listing it. btrfs always reports 1, so fall back to counting entries.
-    if let Some(subdirs) = meta.nlink().checked_sub(2) {
-        return usize::try_from(subdirs).unwrap_or(0);
+    if let Some(subdirs) = st.nlink.checked_sub(2) {
+        return subdirs as usize;
     }
-    fs::read_dir(path).map_or(0, |entries| {
-        entries.filter_map(Result::ok).filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).count()
-    })
+    let mut count = 0;
+    sys::for_each_entry(path, |name, kind| {
+        count += usize::from(kind == sys::DT_DIR && name != b"." && name != b"..");
+    });
+    count
 }
 
-fn count_matching_lines(path: &str, pred: impl Fn(&str) -> bool) -> usize {
-    fs::read_to_string(path).map_or(0, |s| s.lines().filter(|l| pred(l)).count())
+fn count_matching_lines(path: &str, pred: impl Fn(&[u8]) -> bool) -> usize {
+    let mut count = 0;
+    sys::for_each_line(path, |line| {
+        count += usize::from(pred(line));
+        true
+    });
+    count
 }
 
 fn xbps() -> usize {
-    let Ok(entries) = fs::read_dir("/var/db/xbps") else { return 0 };
-    entries
-        .filter_map(Result::ok)
-        .find(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("pkgdb-") && name.ends_with(".plist")
-        })
-        .and_then(|e| fs::read_to_string(e.path()).ok())
-        .map_or(0, |s| s.matches("<string>installed</string>").count())
-}
-
-/// Packages in the user's `nix profile` (each element of manifest.json lists its store paths).
-fn nix_profile(home: &str) -> usize {
-    fs::read_to_string(format!("{home}/.nix-profile/manifest.json"))
-        .map_or(0, |s| s.matches("\"storePaths\"").count())
+    let mut pkgdb = None;
+    sys::for_each_entry("/var/db/xbps", |name, _| {
+        if pkgdb.is_none() && name.starts_with(b"pkgdb-") && name.ends_with(b".plist") {
+            pkgdb = Some(format!("/var/db/xbps/{}", String::from_utf8_lossy(name)));
+        }
+    });
+    pkgdb.map_or(0, |path| sys::count_in_file(&path, b"<string>installed</string>"))
 }
 
 const SHELLS: &[&str] = &[
@@ -183,7 +183,9 @@ struct Proc {
 }
 
 fn proc_info(pid: u32) -> Option<Proc> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The main thread's stat carries the same name and parent, without the kernel summing
+    // CPU times over every thread first (terminals are usually multi-threaded).
+    let stat = sys::read_small(&format!("/proc/{pid}/task/{pid}/stat"))?;
     // `comm` is parenthesised and may itself contain spaces or parens.
     let open = stat.find('(')?;
     let close = stat.rfind(')')?;
@@ -211,7 +213,7 @@ fn normalise_comm(comm: &str) -> String {
 fn shell_and_terminal() -> (Option<String>, Option<String>) {
     let mut shell = None;
     let mut terminal = None;
-    let mut pid = std::os::unix::process::parent_id();
+    let mut pid = sys::getppid();
 
     for _ in 0..16 {
         if pid <= 1 {
@@ -258,7 +260,7 @@ fn desktop() -> Option<String> {
                 ("I3SOCK", "i3"),
             ]
             .into_iter()
-            .find(|(key, _)| env::var_os(key).is_some())
+            .find(|(key, _)| sys::var_bytes(key).is_some())
             .map(|(_, name)| name.to_owned())
         })?;
 
@@ -280,16 +282,16 @@ fn cpu() -> Option<String> {
 /// The brand string straight from the processor: no syscalls at all.
 #[cfg(target_arch = "x86_64")]
 fn cpu_brand() -> Option<String> {
-    use std::arch::x86_64::__cpuid;
+    use core::arch::x86_64::__cpuid;
 
     if __cpuid(0x8000_0000).eax < 0x8000_0004 {
         return None;
     }
-    let mut bytes = Vec::with_capacity(48);
-    for leaf in 0x8000_0002..=0x8000_0004 {
+    let mut bytes = [0; 48];
+    for (leaf, chunk) in (0x8000_0002..=0x8000_0004).zip(bytes.chunks_mut(16)) {
         let r = __cpuid(leaf);
-        for reg in [r.eax, r.ebx, r.ecx, r.edx] {
-            bytes.extend_from_slice(&reg.to_le_bytes());
+        for (reg, out) in [r.eax, r.ebx, r.ecx, r.edx].into_iter().zip(chunk.chunks_mut(4)) {
+            out.copy_from_slice(&reg.to_le_bytes());
         }
     }
     let brand = String::from_utf8_lossy(&bytes);
@@ -305,9 +307,8 @@ fn cpu_brand() -> Option<String> {
 fn cpu_model_from_proc() -> Option<String> {
     // The model sits in the first processor's block, so one read is enough and spares
     // the kernel from formatting every core.
-    let mut buf = [0; 4096];
-    let n = File::open("/proc/cpuinfo").ok()?.read(&mut buf).ok()?;
-    String::from_utf8_lossy(&buf[..n]).lines().find_map(|line| {
+    let text = sys::read_prefix("/proc/cpuinfo", 4096)?;
+    String::from_utf8_lossy(&text).lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;
         matches!(key.trim(), "model name" | "Hardware" | "Model").then(|| value.trim().to_owned())
     })
@@ -315,7 +316,7 @@ fn cpu_model_from_proc() -> Option<String> {
 
 /// Counts CPUs from a kernel range list such as `0-7,16-23`.
 fn online_cpus() -> Option<usize> {
-    let list = fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+    let list = sys::read_small("/sys/devices/system/cpu/online")?;
     list.trim().split(',').try_fold(0, |total, range| {
         let (lo, hi) = range.split_once('-').unwrap_or((range, range));
         let (lo, hi): (usize, usize) = (lo.parse().ok()?, hi.parse().ok()?);
@@ -338,7 +339,7 @@ fn clean_cpu_name(raw: &str) -> String {
 }
 
 fn memory() -> Option<Memory> {
-    let info = fs::read_to_string("/proc/meminfo").ok()?;
+    let info = sys::read_small("/proc/meminfo")?;
     let field = |key: &str| -> Option<u64> {
         info.lines()
             .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))?
@@ -373,5 +374,23 @@ mod tests {
         assert_eq!(normalise_comm("tmux: server"), "tmux");
         assert_eq!(normalise_comm("gnome-terminal-"), "gnome-terminal");
         assert_eq!(normalise_comm("sshd-session"), "ssh");
+    }
+
+    #[test]
+    fn count_dirs_counts_subdirectories_only() {
+        let dir = std::env::temp_dir().join(format!("macho-dirs-{}", std::process::id()));
+        for sub in ["a", "b", "c"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("file"), "").unwrap();
+        assert_eq!(count_dirs(dir.to_str().unwrap()), 3);
+        assert_eq!(count_dirs(dir.join("file").to_str().unwrap()), 0);
+        assert_eq!(count_dirs("/nonexistent/macho"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn arch_matches_std() {
+        assert_eq!(ARCH, std::env::consts::ARCH);
     }
 }

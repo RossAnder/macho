@@ -1,17 +1,21 @@
 //! Lays the logo and the info column side by side.
 
-use std::fmt::Write;
+use alloc::string::String;
+use core::fmt::Write;
 
 use crate::info::{Memory, System};
-use crate::logo::Logo;
+use crate::logo::{Art, Logo};
 use crate::term::{BOLD, Block, DIM, fg_code};
 
 const MARGIN: &str = "  ";
 const GAP: &str = "   ";
 const KEY_WIDTH: usize = 8;
 
+/// Each coloured logo as `build.rs` rendered it: name, lines joined by newlines, width.
+static PRERENDERED: &[(&str, &str, usize)] = include!(concat!(env!("OUT_DIR"), "/art.rs"));
+
 pub fn render(sys: &System, logo: &Logo, color: bool) -> String {
-    let art = logo.render(color);
+    let art = color.then(|| prerendered(logo)).flatten().unwrap_or_else(|| logo.render(color));
     let info = info_block(sys, color, fg_code(logo.accent()));
 
     let height = art.lines.len().max(info.len());
@@ -26,7 +30,7 @@ pub fn render(sys: &System, logo: &Logo, color: bool) -> String {
         out.push_str(MARGIN);
         match row.checked_sub(art_top).and_then(|i| art.lines.line(i)) {
             Some(line) => out.push_str(line),
-            None => out.extend(std::iter::repeat_n(' ', art.width)),
+            None => out.extend(core::iter::repeat_n(' ', art.width)),
         }
         if let Some(line) = row.checked_sub(info_top).and_then(|i| info.line(i)) {
             out.push_str(GAP);
@@ -36,6 +40,16 @@ pub fn render(sys: &System, logo: &Logo, color: bool) -> String {
     }
     out.push('\n');
     out
+}
+
+fn prerendered(logo: &Logo) -> Option<Art> {
+    let &(_, text, width) = PRERENDERED.iter().find(|&&(name, ..)| name == logo.name)?;
+    let mut lines = Block::new(true, text.len(), 32);
+    for line in text.split('\n') {
+        lines.push(line);
+        lines.end_line();
+    }
+    Some(Art { lines, width })
 }
 
 enum Value<'a> {
@@ -147,6 +161,18 @@ mod tests {
         f(&mut b);
         b.end_line();
         b.line(0).unwrap().to_owned()
+    }
+
+    #[test]
+    fn prerendered_logos_match_the_renderer() {
+        for logo in crate::logo::LOGOS {
+            let (built, live) = (prerendered(logo).unwrap(), logo.render(true));
+            assert_eq!(built.width, live.width, "{}", logo.name);
+            assert_eq!(built.lines.len(), live.lines.len(), "{}", logo.name);
+            for i in 0..live.lines.len() {
+                assert_eq!(built.lines.line(i), live.lines.line(i), "{} line {i}", logo.name);
+            }
+        }
     }
 
     #[test]

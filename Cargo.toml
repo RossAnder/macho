@@ -2,10 +2,26 @@
 name = "macho"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.99"
 description = "A small, fast system fetch with solid block-art logos"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RossAnder/macho"
+readme = "README.md"
+keywords = ["fetch", "neofetch", "sysinfo", "terminal", "cli"]
+categories = ["command-line-utilities"]
+exclude = ["/assets", "/docs", "/scripts", "/.github"]
+
+[[bin]]
+name = "macho"
+path = "src/main.rs"
+# The binary brings its own runtime and cannot host the test harness; tests live in the library.
+test = false
 
 [dependencies]
+
+# No unwinding: there is no runtime to unwind into.
+[profile.dev]
+panic = "abort"
 
 [profile.release]
 opt-level = "s"
@@ -13,3 +29,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# For `cargo +nightly tiny` (.cargo/config.toml).
+[profile.tiny]
+inherits = "release"
+opt-level = "z"

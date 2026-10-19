@@ -6,6 +6,10 @@
 //! theme. In shaded logos, normal colours 1–7 dither into their bright twins down
 //! the height of their slot; flat logos carry their own lighting in the bitmap.
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::term::{Block, DEFAULT_BG, fg_code};
 
 pub struct Logo {
@@ -34,7 +38,7 @@ macro_rules! logo {
 
 const FALLBACK: &str = "linux";
 
-const LOGOS: &[Logo] = &[
+pub(crate) const LOGOS: &[Logo] = &[
     logo!("arch", ids: ["arch", "archarm"], colors: [4]),
     logo!("alpine", ids: ["alpine"], colors: [4]),
     logo!("debian", ids: ["debian"], colors: [1]),
@@ -92,13 +96,25 @@ impl Logo {
             }
         }
 
-        let pixel = |y: usize, x: usize| -> Option<u8> {
-            let slot = slot_at(y, x)?;
-            let base = *self.colors.get(slot)?;
-            let (top, bottom) = spans[slot];
-            let shades = self.shaded && (1..=7).contains(&base);
-            Some(if shades && faded(x, y, y - top, bottom - top + 1) { base + 8 } else { base })
-        };
+        // Resolve every pixel to a palette index once. The fade level depends only on the
+        // slot and the row, so it is worked out per row rather than per pixel.
+        let mut pixels = vec![None; rows.len() * width];
+        for (y, row) in rows.iter().enumerate() {
+            let levels =
+                spans.map(
+                    |(top, bottom)| {
+                        if y < top || y > bottom { 0 } else { fade_level(y - top, bottom - top + 1) }
+                    },
+                );
+            for x in 0..row.len() {
+                let Some(slot) = slot_at(y, x) else { continue };
+                let Some(&base) = self.colors.get(slot) else { continue };
+                let shades = self.shaded && (1..=7).contains(&base);
+                pixels[y * width + x] =
+                    Some(if shades && BAYER[y % 4][x % 4] < levels[slot] { base + 8 } else { base });
+            }
+        }
+        let pixel = |y: usize, x: usize| pixels.get(y * width + x).copied().flatten();
 
         let height = rows.len().div_ceil(2);
         let mut lines = Block::new(color, height * width * if color { 8 } else { 3 }, height);
@@ -124,13 +140,14 @@ impl Logo {
     }
 }
 
-/// Ordered (Bayer) dither at offset `depth` into a span of `height` rows: solid base
-/// colour over the top third, solid shade over the bottom third, and a pixel-art
-/// blend between. `x`/`y` are absolute so the pattern lines up across slots.
-fn faded(x: usize, y: usize, depth: usize, height: usize) -> bool {
-    const BAYER: [[usize; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-    let level = ((3 * depth).saturating_sub(height) * 16 / height).min(16);
-    BAYER[y % 4][x % 4] < level
+/// Ordered (Bayer) dither thresholds. A pixel takes the shade when its threshold is below
+/// the fade level; indexing by absolute `x`/`y` lines the pattern up across slots.
+const BAYER: [[usize; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// Fade level (0–16) at offset `depth` into a span of `height` rows: solid base colour
+/// over the top third, solid shade over the bottom third, and a dithered blend between.
+fn fade_level(depth: usize, height: usize) -> usize {
+    ((3 * depth).saturating_sub(height) * 16 / height).min(16)
 }
 
 /// Rendered logo lines, each exactly `width` cells wide.

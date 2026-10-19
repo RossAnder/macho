@@ -1,6 +1,8 @@
 //! ANSI styling and a line buffer that keeps a whole block of text in one allocation.
 
-use std::fmt::{self, Write};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::{self, Write};
 
 pub const BOLD: u8 = 1;
 pub const DIM: u8 = 2;
@@ -63,11 +65,18 @@ impl Block {
             return;
         }
         self.text.push_str("\x1b[");
-        for (i, code) in codes.iter().enumerate() {
+        for (i, &code) in codes.iter().enumerate() {
             if i > 0 {
                 self.text.push(';');
             }
-            let _ = write!(self.text, "{code}");
+            // By hand rather than `write!`: logos emit hundreds of these.
+            if code >= 100 {
+                self.text.push(char::from(b'0' + code / 100));
+            }
+            if code >= 10 {
+                self.text.push(char::from(b'0' + code / 10 % 10));
+            }
+            self.text.push(char::from(b'0' + code % 10));
         }
         self.text.push('m');
     }

@@ -1,0 +1,57 @@
+{
+  "date": "2026-10-20",
+  "machine": "AMD Ryzen 7 3700X 8-Core Processor, 16 threads, governor `powersave`",
+  "system": "Arch Linux, Linux 7.2.9-2-cachyos",
+  "versions": "macho 0.1.0 (release build), fastfetch 2.70.0, microfetch 1.2.0, macchina 6.4.0, pfetch, neofetch 7.1.0",
+  "results": [
+    {
+      "name": "microfetch",
+      "mean_ms": 0.16152012165477186,
+      "stddev_ms": 0.014178473128001383,
+      "min_ms": 0.136359,
+      "instructions": 40910.750334522745
+    },
+    {
+      "name": "macho",
+      "mean_ms": 0.16762592811005794,
+      "stddev_ms": 0.014784203687413199,
+      "min_ms": 0.142931,
+      "instructions": 62461.01358946397
+    },
+    {
+      "name": "fastfetch (macho's fields)",
+      "mean_ms": 25.423601389830516,
+      "stddev_ms": 0.5114175414577448,
+      "min_ms": 24.572335000000002,
+      "instructions": 90410265.51694915
+    },
+    {
+      "name": "macchina",
+      "mean_ms": 26.619114936936946,
+      "stddev_ms": 0.5080144021322316,
+      "min_ms": 25.788075,
+      "instructions": 193111949.4144144
+    },
+    {
+      "name": "fastfetch",
+      "mean_ms": 29.940342653061236,
+      "stddev_ms": 0.5923373142717433,
+      "min_ms": 28.952816000000002,
+      "instructions": 99910906.74489796
+    },
+    {
+      "name": "pfetch",
+      "mean_ms": 62.04604351999999,
+      "stddev_ms": 0.544327232442827,
+      "min_ms": 61.014038000000006,
+      "instructions": 247762546.74
+    },
+    {
+      "name": "neofetch",
+      "mean_ms": 155.95557092,
+      "stddev_ms": 0.8593161316081477,
+      "min_ms": 154.031607,
+      "instructions": 509611117.78
+    }
+  ]
+}
