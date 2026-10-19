@@ -1,0 +1,3 @@
+[alias]
+# Static musl build: no dynamic loader at startup, so it launches markedly faster.
+dist = "build --release --target x86_64-unknown-linux-musl"

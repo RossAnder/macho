@@ -1,0 +1,15 @@
+[package]
+name = "macho"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "A small, fast system fetch with solid block-art logos"
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
