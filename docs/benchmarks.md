@@ -11,13 +11,13 @@ fastfetch row limits it to the fields macho prints, for a like-for-like comparis
 
 | Tool | Mean [ms] | Min [ms] | Relative | Instructions |
 |:---|---:|---:|---:|---:|
-| microfetch | 0.16 ± 0.01 | 0.14 | 1.0× | 0.04 M |
-| **macho** | 0.17 ± 0.01 | 0.14 | 1.0× | 0.06 M |
-| fastfetch (macho's fields) | 25.4 ± 0.5 | 24.6 | 157.4× | 90.41 M |
-| macchina | 26.6 ± 0.5 | 25.8 | 164.8× | 193.11 M |
-| fastfetch | 29.9 ± 0.6 | 29.0 | 185.4× | 99.91 M |
-| pfetch | 62.0 ± 0.5 | 61.0 | 384.1× | 247.76 M |
-| neofetch | 156.0 ± 0.9 | 154.0 | 965.5× | 509.61 M |
+| microfetch | 0.16 ± 0.02 | 0.14 | 1.0× | 0.04 M |
+| **macho** | 0.16 ± 0.01 | 0.15 | 1.0× | 0.04 M |
+| fastfetch (macho's fields) | 25.4 ± 0.5 | 24.8 | 158.1× | 90.40 M |
+| macchina | 26.6 ± 0.5 | 25.7 | 165.2× | 193.11 M |
+| fastfetch | 30.0 ± 0.6 | 29.1 | 186.2× | 99.91 M |
+| pfetch | 62.1 ± 0.5 | 61.2 | 386.1× | 247.76 M |
+| neofetch | 155.6 ± 0.8 | 153.7 | 967.2× | 509.65 M |
 
 Timings move with the machine, the package count and the page cache, so read the
 ratios rather than the absolutes; instructions retired (from perf counters, where

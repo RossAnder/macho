@@ -7,18 +7,17 @@
 //! the height of their slot; flat logos carry their own lighting in the bitmap.
 
 use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
-
-use crate::term::{Block, DEFAULT_BG, fg_code};
 
 pub struct Logo {
     pub name: &'static str,
     /// os-release `ID` values this logo stands for.
     ids: &'static [&'static str],
-    colors: &'static [u8],
-    shaded: bool,
-    art: &'static str,
+    pub(crate) colors: &'static [u8],
+    // The bitmap is drawn by `draw`, which only build.rs and the tests compile.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) shaded: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) art: &'static str,
 }
 
 macro_rules! logo {
@@ -74,125 +73,11 @@ impl Logo {
     pub fn accent(&self) -> u8 {
         self.colors[0]
     }
-
-    /// Renders the bitmap to terminal lines that are all exactly `width` cells wide.
-    pub fn render(&self, color: bool) -> Art {
-        let rows: Vec<&[u8]> = self.art.lines().map(str::as_bytes).collect();
-        let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let slot_at = |y: usize, x: usize| match rows.get(y)?.get(x)? {
-            d @ b'1'..=b'9' => Some(usize::from(d - b'1')),
-            _ => None,
-        };
-
-        // Each slot shades over its own rows, so separate shapes (the Windows panes)
-        // each get a full gradient.
-        let mut spans = [(usize::MAX, 0); 9];
-        for (y, row) in rows.iter().enumerate() {
-            for x in 0..row.len() {
-                if let Some(slot) = slot_at(y, x) {
-                    let span = &mut spans[slot];
-                    *span = (span.0.min(y), span.1.max(y));
-                }
-            }
-        }
-
-        // Resolve every pixel to a palette index once. The fade level depends only on the
-        // slot and the row, so it is worked out per row rather than per pixel.
-        let mut pixels = vec![None; rows.len() * width];
-        for (y, row) in rows.iter().enumerate() {
-            let levels =
-                spans.map(
-                    |(top, bottom)| {
-                        if y < top || y > bottom { 0 } else { fade_level(y - top, bottom - top + 1) }
-                    },
-                );
-            for x in 0..row.len() {
-                let Some(slot) = slot_at(y, x) else { continue };
-                let Some(&base) = self.colors.get(slot) else { continue };
-                let shades = self.shaded && (1..=7).contains(&base);
-                pixels[y * width + x] =
-                    Some(if shades && BAYER[y % 4][x % 4] < levels[slot] { base + 8 } else { base });
-            }
-        }
-        let pixel = |y: usize, x: usize| pixels.get(y * width + x).copied().flatten();
-
-        let height = rows.len().div_ceil(2);
-        let mut lines = Block::new(color, height * width * if color { 8 } else { 3 }, height);
-        for y in (0..rows.len()).step_by(2) {
-            let mut pen = Pen::default();
-            for x in 0..width {
-                let (glyph, fg, bg) = match (pixel(y, x), pixel(y + 1, x)) {
-                    (None, None) => (' ', pen.fg, None),
-                    (Some(t), None) => ('▀', Some(t), None),
-                    (None, Some(b)) => ('▄', Some(b), None),
-                    (Some(t), Some(b)) if t == b || !color => ('█', Some(t), None),
-                    (Some(t), Some(b)) => ('▀', Some(t), Some(b)),
-                };
-                pen.set(&mut lines, fg, bg);
-                lines.push_char(glyph);
-            }
-            if pen != Pen::default() {
-                lines.reset();
-            }
-            lines.end_line();
-        }
-        Art { lines, width }
-    }
-}
-
-/// Ordered (Bayer) dither thresholds. A pixel takes the shade when its threshold is below
-/// the fade level; indexing by absolute `x`/`y` lines the pattern up across slots.
-const BAYER: [[usize; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-
-/// Fade level (0–16) at offset `depth` into a span of `height` rows: solid base colour
-/// over the top third, solid shade over the bottom third, and a dithered blend between.
-fn fade_level(depth: usize, height: usize) -> usize {
-    ((3 * depth).saturating_sub(height) * 16 / height).min(16)
-}
-
-/// Rendered logo lines, each exactly `width` cells wide.
-pub struct Art {
-    pub lines: Block,
-    pub width: usize,
-}
-
-/// Tracks the active colours so only changes are emitted.
-#[derive(Default, PartialEq)]
-struct Pen {
-    fg: Option<u8>,
-    bg: Option<u8>,
-}
-
-impl Pen {
-    fn set(&mut self, out: &mut Block, fg: Option<u8>, bg: Option<u8>) {
-        if fg != self.fg {
-            if let Some(c) = fg {
-                out.sgr(&[fg_code(c)]);
-            }
-            self.fg = fg;
-        }
-        if bg != self.bg {
-            out.sgr(&[bg.map_or(DEFAULT_BG, |c| fg_code(c) + 10)]);
-            self.bg = bg;
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_logo_renders_rectangular() {
-        for logo in LOGOS {
-            let art = logo.render(false);
-            assert!(art.width > 0, "{} is empty", logo.name);
-            for i in 0..art.lines.len() {
-                let line = art.lines.line(i).unwrap();
-                assert_eq!(line.chars().count(), art.width, "{} has a ragged line", logo.name);
-            }
-        }
-    }
 
     #[test]
     fn every_colour_slot_is_defined() {

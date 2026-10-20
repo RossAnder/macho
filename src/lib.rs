@@ -9,8 +9,11 @@
 extern crate alloc;
 
 pub mod bump;
+#[cfg(test)]
+mod draw;
 mod info;
 mod logo;
+mod num;
 mod render;
 pub mod sys;
 mod term;
@@ -77,7 +80,7 @@ pub fn run<'a>(mut args: impl Iterator<Item = &'a [u8]>) -> i32 {
         None => logo::detect(&sys.os_ids),
     };
     let color = sys::var_bytes("NO_COLOR").is_none_or(<[u8]>::is_empty);
-    sys::write_all(1, render::render(&sys, logo, color).as_bytes());
+    render::print(1, &sys, logo, color);
     SUCCESS
 }
 

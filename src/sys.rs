@@ -1,15 +1,17 @@
 //! Linux system calls, made directly: macho links no libc. Wrappers return `None` (or
 //! zero) on any error, because every probe that uses them fails soft anyway.
 
+use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::mem::MaybeUninit;
+use core::ffi::CStr;
 
 #[cfg(target_arch = "x86_64")]
 mod nr {
     pub const READ: usize = 0;
     pub const WRITE: usize = 1;
+    pub const WRITEV: usize = 20;
     pub const CLOSE: usize = 3;
     pub const MMAP: usize = 9;
     pub const UNAME: usize = 63;
@@ -25,6 +27,7 @@ mod nr {
 mod nr {
     pub const READ: usize = 63;
     pub const WRITE: usize = 64;
+    pub const WRITEV: usize = 66;
     pub const CLOSE: usize = 57;
     pub const MMAP: usize = 222;
     pub const UNAME: usize = 160;
@@ -87,33 +90,20 @@ fn ok(ret: isize) -> Option<usize> {
 
 const AT_FDCWD: isize = -100;
 
-/// A path as the kernel wants it: NUL-terminated.
-struct CPath(Vec<u8>);
-
-impl CPath {
-    fn new(path: &str) -> Option<Self> {
-        if path.contains('\0') {
-            return None;
-        }
-        let mut buf = Vec::with_capacity(path.len() + 1);
-        buf.extend_from_slice(path.as_bytes());
-        buf.push(0);
-        Some(Self(buf))
-    }
-
-    fn ptr(&self) -> usize {
-        self.0.as_ptr() as usize
-    }
+/// Joins `parts` into a NUL-terminated path, or `None` if one of them contains a NUL.
+pub fn path(parts: &[&[u8]]) -> Option<CString> {
+    let mut buf = Vec::with_capacity(parts.iter().map(|p| p.len()).sum::<usize>() + 1);
+    parts.iter().for_each(|p| buf.extend_from_slice(p));
+    CString::new(buf).ok()
 }
 
 /// An open file descriptor, closed on drop.
 pub struct Fd(usize);
 
 impl Fd {
-    pub fn open(path: &str) -> Option<Self> {
-        let path = CPath::new(path)?;
+    pub fn open(path: &CStr) -> Option<Self> {
         // SAFETY: `path` is NUL-terminated and outlives the call; flags 0 is O_RDONLY.
-        ok(unsafe { syscall(nr::OPENAT, [AT_FDCWD as usize, path.ptr(), 0, 0, 0, 0]) }).map(Self)
+        ok(unsafe { syscall(nr::OPENAT, [AT_FDCWD as usize, path.as_ptr() as usize, 0, 0, 0, 0]) }).map(Self)
     }
 
     /// One `read` into `buf`'s spare capacity, which it extends. Returns the bytes read.
@@ -137,7 +127,7 @@ impl Drop for Fd {
 
 /// Reads up to `max` bytes of a file's start, in one `read`. Buffers are not zeroed
 /// first, and the allocator gives back what the read did not use.
-fn read_start(path: &str, max: usize) -> Option<Vec<u8>> {
+fn read_start(path: &CStr, max: usize) -> Option<Vec<u8>> {
     let fd = Fd::open(path)?;
     let mut buf = Vec::with_capacity(max);
     fd.read_into(&mut buf)?;
@@ -147,13 +137,13 @@ fn read_start(path: &str, max: usize) -> Option<Vec<u8>> {
 
 /// Reads a small file whole, in one `read`. Proc and sys files report a size of 0 but
 /// deliver everything that fits; `None` if the file is bigger than the buffer.
-pub fn read_small(path: &str) -> Option<String> {
+pub fn read_small(path: &CStr) -> Option<String> {
     const MAX: usize = 8192;
     read_start(path, MAX).filter(|buf| buf.len() < MAX).and_then(|buf| String::from_utf8(buf).ok())
 }
 
 /// Reads up to `max` bytes of a file's start, in one `read`.
-pub fn read_prefix(path: &str, max: usize) -> Option<Vec<u8>> {
+pub fn read_prefix(path: &CStr, max: usize) -> Option<Vec<u8>> {
     read_start(path, max)
 }
 
@@ -161,7 +151,7 @@ const STREAM: usize = 16384;
 
 /// Calls `f` with each line of a file of any size, streamed through a fixed buffer, until
 /// `f` returns false. Lines longer than the buffer are skipped.
-pub fn for_each_line(path: &str, mut f: impl FnMut(&[u8]) -> bool) {
+pub fn for_each_line(path: &CStr, mut f: impl FnMut(&[u8]) -> bool) {
     let Some(fd) = Fd::open(path) else { return };
     let mut buf = Vec::with_capacity(STREAM);
     let mut overlong = false;
@@ -189,7 +179,7 @@ pub fn for_each_line(path: &str, mut f: impl FnMut(&[u8]) -> bool) {
 }
 
 /// Counts the non-overlapping occurrences of `needle` in a file of any size.
-pub fn count_in_file(path: &str, needle: &[u8]) -> usize {
+pub fn count_in_file(path: &CStr, needle: &[u8]) -> usize {
     let Some(fd) = Fd::open(path) else { return 0 };
     let mut buf = Vec::with_capacity(STREAM);
     let mut count = 0;
@@ -208,13 +198,15 @@ pub fn count_in_file(path: &str, needle: &[u8]) -> usize {
 }
 
 /// Calls `f` with the name and `d_type` of each entry in a directory.
-pub fn for_each_entry(path: &str, mut f: impl FnMut(&[u8], u8)) {
+pub fn for_each_entry(path: &CStr, mut f: impl FnMut(&[u8], u8)) {
     let Some(fd) = Fd::open(path) else { return };
-    let mut buf = [MaybeUninit::<u64>::uninit(); 512]; // u64s: the records are 8-byte aligned
+    // On the heap: this much stack would cost a fresh page even when the directory is never
+    // listed. u64s, so the records inside are 8-byte aligned.
+    let mut buf = Vec::<u64>::with_capacity(512);
+    let size = buf.capacity() * size_of::<u64>();
     loop {
-        // SAFETY: `buf` is valid for writes of its byte length.
-        let ret =
-            unsafe { syscall(nr::GETDENTS64, [fd.0, buf.as_mut_ptr() as usize, size_of_val(&buf), 0, 0, 0]) };
+        // SAFETY: `buf` is valid for writes of `size` bytes.
+        let ret = unsafe { syscall(nr::GETDENTS64, [fd.0, buf.as_mut_ptr() as usize, size, 0, 0, 0]) };
         let Some(n) = ok(ret).filter(|&n| n > 0) else { return };
         // SAFETY: the kernel initialised the first `n` bytes.
         let bytes = unsafe { core::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
@@ -237,18 +229,24 @@ pub struct Stat {
     pub is_dir: bool,
 }
 
-pub fn stat(path: &str) -> Option<Stat> {
+pub fn stat(path: &CStr) -> Option<Stat> {
     #[repr(C, align(8))]
     struct Statx([u8; 256]);
     const STATX_TYPE: usize = 1;
     const STATX_NLINK: usize = 4;
-    let path = CPath::new(path)?;
     let mut buf = Statx([0; 256]);
     // SAFETY: `path` is NUL-terminated and `buf` is a struct statx's size and alignment.
     let ret = unsafe {
         syscall(
             nr::STATX,
-            [AT_FDCWD as usize, path.ptr(), 0, STATX_TYPE | STATX_NLINK, buf.0.as_mut_ptr() as usize, 0],
+            [
+                AT_FDCWD as usize,
+                path.as_ptr() as usize,
+                0,
+                STATX_TYPE | STATX_NLINK,
+                buf.0.as_mut_ptr() as usize,
+                0,
+            ],
         )
     };
     ok(ret)?;
@@ -305,6 +303,36 @@ pub fn write_all(fd: usize, mut bytes: &[u8]) {
     }
 }
 
+/// Writes all of `parts` with `writev`, so they need not be copied into one buffer first,
+/// giving up on the first error.
+pub fn write_all_vectored(fd: usize, parts: &[&[u8]]) {
+    #[repr(C)]
+    struct IoVec {
+        base: *const u8,
+        len: usize,
+    }
+    const IOV_MAX: usize = 1024;
+    let mut iov: Vec<IoVec> =
+        parts.iter().filter(|p| !p.is_empty()).map(|p| IoVec { base: p.as_ptr(), len: p.len() }).collect();
+    let mut first = 0;
+    while first < iov.len() {
+        let rest = &iov[first..];
+        // SAFETY: each entry describes a live slice, and `rest` holds at least the count.
+        let ret =
+            unsafe { syscall(nr::WRITEV, [fd, rest.as_ptr() as usize, rest.len().min(IOV_MAX), 0, 0, 0]) };
+        let Some(mut n) = ok(ret).filter(|&n| n > 0) else { return };
+        // Skip what was written, which may end partway through an entry.
+        while n > 0 {
+            let v = &mut iov[first];
+            if n < v.len {
+                (v.base, v.len, n) = (v.base.wrapping_add(n), v.len - n, 0);
+            } else {
+                (n, first) = (n - v.len, first + 1);
+            }
+        }
+    }
+}
+
 pub fn exit(code: i32) -> ! {
     // SAFETY: exit_group ends the process and never returns.
     unsafe { syscall(nr::EXIT_GROUP, [code as usize, 0, 0, 0, 0, 0]) };
@@ -335,15 +363,25 @@ pub fn var_bytes(key: &str) -> Option<&'static [u8]> {
     // stops at the first differing byte, and an entry's NUL differs from every key byte,
     // so no read passes the end of an entry.
     unsafe {
-        while !(*entry).is_null() {
+        loop {
             let s = *entry;
-            if (0..key.len()).all(|i| *s.add(i) == key[i]) && *s.add(key.len()) == b'=' {
-                return Some(core::ffi::CStr::from_ptr(s.add(key.len() + 1).cast()).to_bytes());
+            if s.is_null() {
+                return None;
             }
             entry = entry.add(1);
+            // Nearly every entry differs in its first byte, so test that before looping.
+            if *s != key[0] {
+                continue;
+            }
+            let mut i = 1;
+            while i < key.len() && *s.add(i) == key[i] {
+                i += 1;
+            }
+            if i == key.len() && *s.add(i) == b'=' {
+                return Some(CStr::from_ptr(s.add(i + 1).cast()).to_bytes());
+            }
         }
     }
-    None
 }
 
 /// Tests run under std's runtime, which never hands us the environment block.
@@ -363,6 +401,10 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn c(path: &std::path::Path) -> CString {
+        CString::new(path.to_str().unwrap()).unwrap()
+    }
+
     #[test]
     fn small_reads_match_std_up_to_the_buffer() {
         let dir = std::env::temp_dir().join(format!("macho-sys-{}", std::process::id()));
@@ -370,16 +412,13 @@ mod tests {
         for len in [0, 10, 8191, 8192] {
             let path = dir.join(len.to_string());
             fs::write(&path, "x".repeat(len)).unwrap();
-            let ours = read_small(path.to_str().unwrap());
-            assert_eq!(
-                read_prefix(path.to_str().unwrap(), 100).unwrap(),
-                "x".repeat(len.min(100)).as_bytes()
-            );
+            let ours = read_small(&c(&path));
+            assert_eq!(read_prefix(&c(&path), 100).unwrap(), "x".repeat(len.min(100)).as_bytes());
             assert_eq!(ours, (len < 8192).then(|| "x".repeat(len)), "{len} bytes");
         }
         fs::remove_dir_all(dir).unwrap();
-        assert!(read_small("/proc/meminfo").unwrap().contains("MemAvailable:"));
-        assert_eq!(read_small("/nonexistent/macho"), None);
+        assert!(read_small(c"/proc/meminfo").unwrap().contains("MemAvailable:"));
+        assert_eq!(read_small(c"/nonexistent/macho"), None);
     }
 
     #[test]
@@ -389,7 +428,7 @@ mod tests {
         let text: String =
             (0..5000).map(|i| format!("P:pkg{i}\nV:1.{i}\n<string>installed</string>\n")).collect();
         fs::write(&path, &text).unwrap();
-        let p = path.to_str().unwrap();
+        let p = &c(&path);
         let mut lines = 0;
         for_each_line(p, |l| {
             lines += usize::from(l.starts_with(b"P:"));
@@ -402,16 +441,22 @@ mod tests {
     }
 
     #[test]
+    fn paths_join_and_refuse_nul() {
+        assert_eq!(path(&[b"/proc/", b"42", b"/stat"]).unwrap().as_bytes(), b"/proc/42/stat");
+        assert_eq!(path(&[b"a\0b"]), None);
+    }
+
+    #[test]
     fn directories_list_and_stat() {
         let mut names = Vec::new();
-        for_each_entry("/proc/self", |name, kind| {
+        for_each_entry(c"/proc/self", |name, kind| {
             names.push((String::from_utf8_lossy(name).into_owned(), kind))
         });
         assert!(names.iter().any(|(n, k)| n == "task" && *k == DT_DIR));
         assert!(names.iter().any(|(n, _)| n == "stat"));
-        let st = stat("/proc/self/task").unwrap();
+        let st = stat(c"/proc/self/task").unwrap();
         assert!(st.is_dir && st.nlink >= 2);
-        assert!(!stat("/proc/self/stat").unwrap().is_dir);
+        assert!(!stat(c"/proc/self/stat").unwrap().is_dir);
     }
 
     #[test]

@@ -86,7 +86,7 @@ To add your own, see [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-logo).
   <img src="assets/bench-dark.png" alt="Bar chart of mean time to print one fetch: microfetch and macho both well under a millisecond, then fastfetch, macchina, pfetch and neofetch two to three orders of magnitude slower">
 </picture>
 
-On the machine above (2026-10-20), macho printed a fetch in 0.17 ms, within 4% of
+On the machine above (2026-10-20), macho printed a fetch in 0.16 ms, within 1% of
 microfetch while also counting packages and finding the shell, terminal and desktop,
 and roughly 150–950× faster than fastfetch, macchina, pfetch and neofetch, including
 fastfetch limited to the same fields. Method, versions and the full table

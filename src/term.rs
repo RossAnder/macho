@@ -2,11 +2,9 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::{self, Write};
 
 pub const BOLD: u8 = 1;
 pub const DIM: u8 = 2;
-pub const DEFAULT_BG: u8 = 49;
 
 /// SGR foreground code for a 16-colour palette index (add 10 for background).
 pub fn fg_code(index: u8) -> u8 {
@@ -36,10 +34,6 @@ impl Block {
 
     pub fn len(&self) -> usize {
         self.ends.len()
-    }
-
-    pub fn text_len(&self) -> usize {
-        self.text.len()
     }
 
     pub fn line(&self, i: usize) -> Option<&str> {
@@ -91,13 +85,6 @@ impl Block {
         self.sgr(codes);
         self.text.push_str(text);
         self.reset();
-    }
-}
-
-impl Write for Block {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.text.push_str(s);
-        Ok(())
     }
 }
 

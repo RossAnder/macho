@@ -15,5 +15,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `NO_COLOR` support.
 - A static binary that links neither the standard library nor libc, for x86-64 and
   aarch64 Linux.
+- Logos are drawn with as few colour changes as their pixels allow, flipping half-block
+  glyphs instead of switching colours, which cuts the output by 9–25%.
 
 [Unreleased]: https://github.com/RossAnder/macho/commits/master
