@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  # The toolchain floor declared as rust-version in Cargo.toml.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - run: cargo test --locked
+
+  # The binary makes its own system calls and has its own entry point, so it is built
+  # and run on each architecture it has assembly for. The tests call the same syscalls.
+  static:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Static, and runs
+        run: |
+          file target/release/macho | grep -q "statically linked"
+          target/release/macho
+          NO_COLOR=1 target/release/macho
+          for logo in $(target/release/macho --list-logos); do target/release/macho --logo "$logo" > /dev/null; done
+          target/release/macho --version
+          ! target/release/macho --bogus
+
+  # Unstable flags can change under it, so a failure here is a warning, not a block.
+  tiny:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: cargo +nightly tiny --locked
+      - run: target/x86_64-unknown-linux-gnu/tiny/macho

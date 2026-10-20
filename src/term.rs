@@ -1,10 +1,10 @@
 //! ANSI styling and a line buffer that keeps a whole block of text in one allocation.
 
-use std::fmt::{self, Write};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub const BOLD: u8 = 1;
 pub const DIM: u8 = 2;
-pub const DEFAULT_BG: u8 = 49;
 
 /// SGR foreground code for a 16-colour palette index (add 10 for background).
 pub fn fg_code(index: u8) -> u8 {
@@ -36,10 +36,6 @@ impl Block {
         self.ends.len()
     }
 
-    pub fn text_len(&self) -> usize {
-        self.text.len()
-    }
-
     pub fn line(&self, i: usize) -> Option<&str> {
         let end = *self.ends.get(i)?;
         let start = i.checked_sub(1).map_or(0, |p| self.ends[p]);
@@ -63,11 +59,18 @@ impl Block {
             return;
         }
         self.text.push_str("\x1b[");
-        for (i, code) in codes.iter().enumerate() {
+        for (i, &code) in codes.iter().enumerate() {
             if i > 0 {
                 self.text.push(';');
             }
-            let _ = write!(self.text, "{code}");
+            // By hand rather than `write!`: logos emit hundreds of these.
+            if code >= 100 {
+                self.text.push(char::from(b'0' + code / 100));
+            }
+            if code >= 10 {
+                self.text.push(char::from(b'0' + code / 10 % 10));
+            }
+            self.text.push(char::from(b'0' + code % 10));
         }
         self.text.push('m');
     }
@@ -82,13 +85,6 @@ impl Block {
         self.sgr(codes);
         self.text.push_str(text);
         self.reset();
-    }
-}
-
-impl Write for Block {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.text.push_str(s);
-        Ok(())
     }
 }
 

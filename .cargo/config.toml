@@ -1,3 +1,13 @@
 [alias]
-# Static musl build: no dynamic loader at startup, so it launches markedly faster.
-dist = "build --release --target x86_64-unknown-linux-musl"
+# Smallest build: core and alloc rebuilt for size, without unwind tables. Needs nightly
+# and `rustup component add rust-src`. The binary is at target/<triple>/tiny/macho.
+tiny = [
+    "build", "--profile", "tiny", "--target", "x86_64-unknown-linux-gnu",
+    "-Zbuild-std=core,alloc", "-Zbuild-std-features=optimize_for_size",
+]
+
+# The binary is static and not position-independent (build.rs links it so), which
+# lets it be compiled without PIC indirection. `cargo install` skips this file and
+# still gets a working, slightly slower binary.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "relocation-model=static", "-C", "force-unwind-tables=no"]
